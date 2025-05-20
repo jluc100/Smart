@@ -1,104 +1,81 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const pool = require('./db'); // Make sure db.js is configured correctly
+const pool = require('./db');
 require('dotenv').config();
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
+// Language data
 const languages = {
     en: {
         welcome: `CON Welcome to SmartCourier\n1. English\n2. Kinyarwanda`,
         main: `CON Main Menu:\n1. Request Pickup\n2. Track Package\n3. Help\n0. Back`,
         help: `END For support, call 1234 or visit smartcourier.com`,
-        track: `END Tracking is not implemented yet.`,
         invalid: `END Invalid option`,
-        askPickup: `CON Enter Pickup Location:`,
-        askDestination: `CON Enter Destination Location:`,
-        confirmed: `END Pickup from [FROM] to [TO] confirmed. Thank you!`
     },
     rw: {
         welcome: `CON Murakaza neza kuri SmartCourier\n1. Icyongereza\n2. Ikinyarwanda`,
         main: `CON Menyu Nyamukuru:\n1. Saba Gutwara Ipaki\n2. Kurikirana Ipaki\n3. Ubufasha\n0. Subira Inyuma`,
         help: `END Kubufasha, hamagara 1234 cyangwa usure smartcourier.com`,
-        track: `END Kurikirana ntibirashyirwa mu bikorwa.`,
         invalid: `END Igisubizo ntigihari`,
-        askPickup: `CON Andika aho ipaki izaturuka:`,
-        askDestination: `CON Andika aho ipaki ijya:`,
-        confirmed: `END Gutwara ipaki kuva [FROM] ujya [TO] byemejwe. Murakoze!`
     }
 };
 
-// In-memory session state
-const sessionStates = {};
+// Store language by session ID
+const sessionLanguages = {};
 
 app.post('/ussd', async (req, res) => {
     const { sessionId, phoneNumber, text } = req.body;
     const inputs = text.split('*');
-    const level = inputs.length;
     let response = '';
-    let lang = sessionStates[sessionId]?.language || 'en';
+    const level = inputs.length;
 
-    // Log session to DB
+    // Store session in DB
     try {
         await pool.query(
-            `INSERT INTO sessions (sessionID, phoneNumber, userInput, language, timestamp)
-             VALUES ($1, $2, $3, $4, NOW())
-             ON CONFLICT (sessionID) DO UPDATE SET userInput = $3, language = $4, timestamp = NOW()`,
-            [sessionId, phoneNumber, text, lang]
+            'INSERT INTO sessions (sessionID, phoneNumber, userInput) VALUES ($1, $2, $3) ON CONFLICT (sessionID) DO UPDATE SET userInput = $3',
+            [sessionId, phoneNumber, text]
         );
     } catch (err) {
-        console.error('DB Session Error:', err.message);
+        console.error(err);
     }
 
-    // USSD logic
+    // Language selection
     if (text === '') {
-        sessionStates[sessionId] = { level: 1 };
-        response = languages.en.welcome;
-    } else if (level === 1 && (inputs[0] === '1' || inputs[0] === '2')) {
-        lang = inputs[0] === '1' ? 'en' : 'rw';
-        sessionStates[sessionId] = { language: lang, level: 2 };
+        response = `CON Welcome / Murakaza neza\n1. English\n2. Kinyarwanda`;
+    } else if (level === 1 && (text === '1' || text === '2')) {
+        const lang = text === '1' ? 'en' : 'rw';
+        sessionLanguages[sessionId] = lang;
         response = languages[lang].main;
     } else if (level === 2) {
+        const lang = sessionLanguages[sessionId] || 'en';
         const option = inputs[1];
-        lang = sessionStates[sessionId]?.language || 'en';
 
         if (option === '1') {
-            sessionStates[sessionId].level = 3;
-            response = languages[lang].askPickup;
+            response = `END [${lang.toUpperCase()}] Pickup request in progress...`;
         } else if (option === '2') {
-            response = languages[lang].track;
+            response = `END [${lang.toUpperCase()}] Package is in transit`;
         } else if (option === '3') {
             response = languages[lang].help;
+        } else if (option === '0') {
+            response = languages[lang].welcome;
         } else {
             response = languages[lang].invalid;
         }
-    } else if (level === 3) {
-        sessionStates[sessionId].pickup = inputs[2];
-        sessionStates[sessionId].level = 4;
-        response = languages[lang].askDestination;
-    } else if (level === 4) {
-        const pickup = sessionStates[sessionId].pickup;
-        const destination = inputs[3];
 
+        // Log action
         try {
             await pool.query(
-                `INSERT INTO transactions (sessionID, phoneNumber, action, pickup, destination, timestamp)
-                 VALUES ($1, $2, $3, $4, $5, NOW())`,
-                [sessionId, phoneNumber, 'pickup_request', pickup, destination]
+                'INSERT INTO transactions (sessionID, phoneNumber, action) VALUES ($1, $2, $3)',
+                [sessionId, phoneNumber, text]
             );
         } catch (err) {
-            console.error('Transaction DB Error:', err.message);
+            console.error(err);
         }
-
-        response = languages[lang].confirmed
-            .replace('[FROM]', pickup)
-            .replace('[TO]', destination);
-
-        delete sessionStates[sessionId];
     } else {
-        response = languages[lang].invalid;
+        response = `END Invalid input`;
     }
 
     res.set('Content-Type', 'text/plain');
@@ -106,5 +83,5 @@ app.post('/ussd', async (req, res) => {
 });
 
 app.listen(3000, () => {
-    console.log('✅ SmartCourier USSD running at http://localhost:3000/ussd');
+    console.log('SmartCourier USSD running on http://localhost:3000/ussd');
 });
